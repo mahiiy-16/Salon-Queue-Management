@@ -5,9 +5,14 @@ import crypto from 'crypto';
 
 export const queueRouter = Router();
 
-// Helper: Calculate wait time for a specific ticket
+// Helper: Calculate wait time and position for a specific ticket according to docs/03-flows-rules.md Section 5
 function calculateTicketWaitTime(ticket: any): { position: number; waitTime: number } {
-  // Find all waiting tickets ordered by created_at (FCFS)
+  // If ticket is not in Waiting status, position/wait time are 0
+  if (ticket.status !== 'Waiting') {
+    return { position: 0, waitTime: 0 };
+  }
+
+  // 1. Fetch all active waiting tickets ordered by created_at strictly (FCFS)
   const waitingTickets = db.prepare(`
     SELECT * FROM queue_tickets 
     WHERE status = 'Waiting' 
@@ -18,7 +23,7 @@ function calculateTicketWaitTime(ticket: any): { position: number; waitTime: num
   const ticketIndex = waitingTickets.findIndex((t) => t.id === ticket.id || t.token === ticket.token);
   const position = ticketIndex >= 0 ? ticketIndex + 1 : 1;
 
-  // Active barbers working
+  // Active barbers working (is_on_duty = 1 AND is_on_break = 0)
   const workingBarbers = db.prepare(`
     SELECT COUNT(*) as count 
     FROM barbers 
@@ -26,25 +31,24 @@ function calculateTicketWaitTime(ticket: any): { position: number; waitTime: num
   `).get() as { count: number };
   const numBarbers = Math.max(1, workingBarbers.count);
 
-  if (ticketIndex <= 0) {
-    return { position: 1, waitTime: ticket.preferred_barber === 'any' ? 5 : 10 };
-  }
+  // Tickets ahead of this ticket in chronological order
+  const ticketsAhead = ticketIndex > 0 ? waitingTickets.slice(0, ticketIndex) : [];
 
-  // Sum durations of all tickets ahead
-  const ticketsAhead = waitingTickets.slice(0, ticketIndex);
-  let durationAhead = 0;
-
+  // Wait time calculation per docs/03-flows-rules.md Section 5:
+  // For "Any Barber": Wait Time = Total Duration of Services Ahead / Number of Barbers Working
+  // For "Specific Barber": Wait Time = Total Duration of Services Ahead for this barber or Any / 1
   if (ticket.preferred_barber === 'any') {
-    durationAhead = ticketsAhead.reduce((sum, t) => sum + t.total_duration, 0);
-    const waitTime = Math.ceil(durationAhead / numBarbers);
-    return { position, waitTime: Math.max(5, waitTime) };
+    const durationAhead = ticketsAhead.reduce((sum, t) => sum + (t.total_duration || 0), 0);
+    const waitTime = ticketIndex === 0 ? 5 : Math.max(5, Math.ceil(durationAhead / numBarbers));
+    return { position, waitTime };
   } else {
-    // Specific barber queue
+    // Specific barber queue: customers ahead requesting this barber OR "any"
     const specificAhead = ticketsAhead.filter(
       (t) => t.preferred_barber === ticket.preferred_barber || t.preferred_barber === 'any'
     );
-    durationAhead = specificAhead.reduce((sum, t) => sum + t.total_duration, 0);
-    return { position, waitTime: Math.max(5, durationAhead) };
+    const durationAhead = specificAhead.reduce((sum, t) => sum + (t.total_duration || 0), 0);
+    const waitTime = ticketIndex === 0 ? 10 : Math.max(5, durationAhead);
+    return { position, waitTime };
   }
 }
 
@@ -207,6 +211,178 @@ queueRouter.get('/ticket/:idOrToken', (req: Request, res: Response) => {
       isStartComing: ticket.status === 'Waiting' && position === 2,
       isYourTurn: ticket.status === 'Called'
     });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/queue/all (Live waiting and in-service tickets for Reception & TV)
+queueRouter.get('/all', (_req: Request, res: Response) => {
+  try {
+    const tickets = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE status IN ('Waiting', 'Called', 'In Chair')
+      ORDER BY created_at ASC
+    `).all() as any[];
+
+    // Fetch all active barbers & services to enrich data
+    const barbers = db.prepare('SELECT id, name, chair FROM barbers').all() as any[];
+    const barberMap = new Map(barbers.map((b) => [b.id, b]));
+
+    const services = db.prepare('SELECT id, name_en, name_gu, duration, price FROM services').all() as any[];
+    const serviceMap = new Map(services.map((s) => [s.id, s]));
+
+    const enrichedTickets = tickets.map((t) => {
+      const { position, waitTime } = calculateTicketWaitTime(t);
+      const sIds = JSON.parse(t.service_ids || '[]');
+      const ticketServices = sIds.map((id: number) => serviceMap.get(id)).filter(Boolean);
+
+      let prefBarberName = 'Any Barber (Fastest)';
+      if (t.preferred_barber && t.preferred_barber !== 'any') {
+        const b = barberMap.get(t.preferred_barber);
+        if (b) prefBarberName = `${b.name} (${b.chair})`;
+      }
+
+      let assignedBarberName = null;
+      if (t.assigned_barber) {
+        const b = barberMap.get(t.assigned_barber);
+        if (b) assignedBarberName = `${b.name} (${b.chair})`;
+      }
+
+      // Calculate elapsed waiting time in minutes
+      const createdTime = new Date(t.created_at).getTime();
+      const now = Date.now();
+      const elapsedMinutes = Math.floor((now - createdTime) / (1000 * 60));
+
+      return {
+        ...t,
+        serviceIds: sIds,
+        services: ticketServices,
+        preferredBarberName: prefBarberName,
+        assignedBarberName,
+        position,
+        estimatedWaitTime: waitTime,
+        elapsedMinutes,
+        isOverdue: elapsedMinutes >= 60 && t.status === 'Waiting'
+      };
+    });
+
+    res.json(enrichedTickets);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/queue/call-next
+// Rule 2 & 3: Calls earliest customer requesting this barber OR "any"
+// Rule 4: One customer per chair (cannot call if barber's chair is currently occupied in "In Chair" status)
+queueRouter.post('/call-next', (req: Request, res: Response) => {
+  try {
+    const { barberId } = req.body;
+    if (!barberId) {
+      res.status(400).json({ error: 'Barber ID is required to call next customer.' });
+      return;
+    }
+
+    const barber = db.prepare('SELECT * FROM barbers WHERE id = ?').get(barberId) as any;
+    if (!barber) {
+      res.status(404).json({ error: 'Barber not found.' });
+      return;
+    }
+
+    // Check Rule 4: One customer per chair
+    const occupied = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE assigned_barber = ? AND status = 'In Chair'
+    `).get(barberId) as any;
+
+    if (occupied) {
+      res.status(400).json({
+        error: `Chair is currently occupied by ${occupied.customer_name} (Token: ${occupied.token}). Complete service before calling next.`
+      });
+      return;
+    }
+
+    // If barber has a Called customer waiting to sit down, return that or allow re-calling
+    // Scan waiting queue strictly in chronological order (FCFS)
+    const waitingTickets = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE status = 'Waiting' 
+      ORDER BY created_at ASC
+    `).all() as any[];
+
+    // Rule 2 & 3: Match earliest customer where preferred_barber == barberId OR preferred_barber == 'any'
+    const targetTicket = waitingTickets.find(
+      (t) => t.preferred_barber === barberId || t.preferred_barber === 'any'
+    );
+
+    if (!targetTicket) {
+      res.status(404).json({ error: `No waiting customers available for ${barber.name}.` });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE queue_tickets 
+      SET status = 'Called', assigned_barber = ?, called_at = ?
+      WHERE id = ?
+    `).run(barberId, now, targetTicket.id);
+
+    const updatedTicket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(targetTicket.id) as any;
+
+    try {
+      getIO().emit('queue:updated', {
+        type: 'CUSTOMER_CALLED',
+        id: updatedTicket.id,
+        token: updatedTicket.token,
+        barberId,
+        barberName: barber.name,
+        chair: barber.chair
+      });
+    } catch {
+      // Socket not active in standalone test
+    }
+
+    res.json({
+      success: true,
+      ticket: updatedTicket,
+      message: `Called ${updatedTicket.customer_name} (${updatedTicket.token}) to ${barber.chair} (${barber.name})`
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/queue/ticket/:idOrToken/noshow
+// Rule 7 & 8: Mark customer No-show if called and not present
+queueRouter.post('/ticket/:idOrToken/noshow', (req: Request, res: Response) => {
+  try {
+    const { idOrToken } = req.params;
+
+    const ticket = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE id = ? OR token = ?
+    `).get(idOrToken, idOrToken) as any;
+
+    if (!ticket) {
+      res.status(404).json({ error: 'Queue ticket not found.' });
+      return;
+    }
+
+    if (ticket.status !== 'Called' && ticket.status !== 'Waiting') {
+      res.status(400).json({ error: `Cannot mark '${ticket.status}' ticket as No-show.` });
+      return;
+    }
+
+    db.prepare("UPDATE queue_tickets SET status = 'No-show' WHERE id = ?").run(ticket.id);
+
+    try {
+      getIO().emit('queue:updated', { type: 'TICKET_NOSHOW', id: ticket.id, token: ticket.token });
+    } catch {
+      // Socket not active
+    }
+
+    res.json({ success: true, message: `Ticket ${ticket.token} marked as No-show.` });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

@@ -186,16 +186,18 @@ export const StatusPage: React.FC = () => {
 
         {/* Proactive Notification Banner: "It's Your Turn!" (When status is Called) */}
         {ticket.isYourTurn && (
-          <div className="mt-6 rounded-xl bg-emerald-50 border-2 border-emerald-400 p-5 flex items-start space-x-3.5 shadow-md animate-bounce">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center flex-shrink-0">
+          <div className="mt-6 rounded-xl bg-amber-50 border-2 border-salon-primary p-5 flex items-start space-x-3.5 shadow-md animate-bounce">
+            <div className="w-10 h-10 rounded-xl bg-salon-primary text-salon-card flex items-center justify-center flex-shrink-0">
               <Scissors className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base font-black text-emerald-900">
+              <h3 className="text-base font-black text-salon-primary">
                 {t('status.alert_your_turn_title')}
               </h3>
-              <p className="text-xs text-emerald-800 mt-1 font-medium">
-                Please proceed directly to the chair: <strong>{ticket.barberName}</strong>.
+              <p className="text-xs text-salon-text mt-1 font-medium">
+                {language === 'gu'
+                  ? `કૃપા કરીને સીધા ખુરશી પર આગળ વધો: ${ticket.barberName}.`
+                  : `Please proceed directly to the chair: ${ticket.barberName}.`}
               </p>
             </div>
           </div>
@@ -203,15 +205,15 @@ export const StatusPage: React.FC = () => {
 
         {/* Proactive Notification Banner: "Start Coming!" (When at Position #2) */}
         {ticket.isStartComing && (
-          <div className="mt-6 rounded-xl bg-amber-50 border border-amber-400 p-4 flex items-start space-x-3.5 shadow-sm">
-            <div className="w-8 h-8 rounded-lg bg-amber-200 text-amber-900 flex items-center justify-center flex-shrink-0 mt-0.5">
+          <div className="mt-6 rounded-xl bg-salon-accent-light border border-salon-accent p-4 flex items-start space-x-3.5 shadow-sm">
+            <div className="w-8 h-8 rounded-lg bg-salon-accent text-salon-primary flex items-center justify-center flex-shrink-0 mt-0.5">
               <Bell className="w-5 h-5 animate-bounce" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-amber-900">
+              <h3 className="text-sm font-bold text-salon-primary">
                 {t('status.alert_start_coming_title')}
               </h3>
-              <p className="text-xs text-amber-800 mt-0.5 font-medium">
+              <p className="text-xs text-salon-text mt-0.5 font-medium">
                 {t('status.alert_start_coming_desc')}
               </p>
             </div>

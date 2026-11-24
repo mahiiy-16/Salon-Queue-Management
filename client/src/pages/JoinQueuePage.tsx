@@ -251,33 +251,50 @@ export const JoinQueuePage: React.FC = () => {
                   const serviceName = language === 'gu' ? service.name_gu : service.name_en;
                   const serviceDesc = language === 'gu' ? service.description_gu : service.description_en;
 
+                  const servicePhotos: Record<number, string> = {
+                    1: '/images/hairstyles/haircut.jpg',
+                    2: '/images/hairstyles/beard.jpg',
+                    3: '/images/hairstyles/hairwash.jpg',
+                    4: '/images/hairstyles/facial.jpg',
+                  };
+                  const photoSrc = servicePhotos[service.id] || '/images/hairstyles/haircut.jpg';
+
                   return (
                     <div
                       key={service.id}
                       onClick={() => handleServiceToggle(service.id)}
-                      className={`cursor-pointer rounded-xl p-4 border transition duration-150 flex flex-col justify-between ${
+                      className={`cursor-pointer rounded-xl overflow-hidden border transition duration-150 flex flex-col justify-between ${
                         isSelected
                           ? 'bg-salon-accent-light/50 border-salon-primary shadow-sm'
                           : 'bg-salon-bg border-salon-border hover:border-salon-secondary'
                       }`}
                     >
-                      <div>
-                        <div className="flex items-start justify-between">
-                          <h3 className="text-sm font-bold text-salon-primary">{serviceName}</h3>
-                          <div
-                            className={`w-5 h-5 rounded-md flex items-center justify-center border transition ${
-                              isSelected ? 'bg-salon-primary border-salon-primary text-salon-card' : 'border-salon-muted'
-                            }`}
-                          >
-                            {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                          </div>
+                      <div className="h-28 w-full overflow-hidden bg-salon-card relative">
+                        <img
+                          src={photoSrc}
+                          alt={service.name_en}
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                        />
+                        <div
+                          className={`absolute top-2 right-2 w-6 h-6 rounded-md flex items-center justify-center border shadow-sm transition ${
+                            isSelected ? 'bg-salon-primary border-salon-primary text-salon-card' : 'bg-white/80 border-salon-border text-transparent'
+                          }`}
+                        >
+                          <Check className="w-4 h-4 stroke-[3]" />
                         </div>
-                        <p className="text-xs text-salon-muted mt-1 leading-relaxed">{serviceDesc}</p>
                       </div>
 
-                      <div className="mt-4 pt-2 border-t border-salon-border flex items-center justify-between text-xs font-bold">
-                        <span className="text-salon-primary">₹{service.price}</span>
-                        <span className="text-salon-muted">{service.duration} mins</span>
+                      <div className="p-3.5 flex flex-col justify-between flex-grow">
+                        <div>
+                          <h3 className="text-sm font-bold text-salon-primary">{serviceName}</h3>
+                          <p className="text-xs text-salon-muted mt-1 leading-relaxed line-clamp-2">{serviceDesc}</p>
+                        </div>
+
+                        <div className="mt-3 pt-2 border-t border-salon-border flex items-center justify-between text-xs font-bold">
+                          <span className="text-salon-primary">₹{service.price}</span>
+                          <span className="text-salon-muted">{service.duration} mins</span>
+                        </div>
                       </div>
                     </div>
                   );
@@ -404,7 +421,7 @@ export const JoinQueuePage: React.FC = () => {
               <div className="flex justify-between text-salon-muted font-medium">
                 <span>{t('join.est_wait')}:</span>
                 <span className="font-bold text-salon-secondary">
-                  {selectedBarber === 'any' ? '~15-20 mins' : '~30-40 mins'}
+                  {selectedBarber === 'any' ? '~15 mins' : '~25 mins'}
                 </span>
               </div>
 
