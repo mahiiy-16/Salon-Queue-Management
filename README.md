@@ -1,3 +1,7 @@
+
+**Live Demo: ** [https://salon-queue-management-gamma.vercel.app/] (https://salon-queue-management-gamma.vercel.app/)
+**GitHub: ** [https://github.com/mahiiy-16/Salon-Queue-Management] (https://github.com/mahiiy-16/Salon-Queue-Management)
+
 # Salon Queue Management System (MSc IT Project)
 
 A real-time, bilingual (English & Gujarati) salon queue management application designed to eliminate salon lobby crowding through remote virtual queue registration, multi-service selection, barber station servicing, lobby TV displays, and administrative controls.
