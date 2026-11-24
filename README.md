@@ -8,9 +8,17 @@ A real-time, bilingual (English & Gujarati) salon queue management application d
 
 - **Frontend:** React (v18.3.1), Vite (v5.4.11), TypeScript (v5.6.3), Tailwind CSS (v3.4.15), React Router (v6.28.0)
 - **Backend:** Node.js (v24.x LTS), Express.js (v4.21.1), TypeScript (v5.6.3)
-- **Database:** SQLite (`better-sqlite3` v11.5.0 with WAL mode enabled)
-- **Real-Time Communication:** Socket.IO (v4.8.1)
+- **Database:** PostgreSQL (Neon PostgreSQL Free via `pg` connection pool with SSL) / SQLite fallback
+- **Real-Time Communication:** Socket.IO (v4.8.1) with 4-second reactive polling fallback for serverless architectures
 - **Design System:** Luxury Salon Theme — Ivory, Cream & Deep Brown (`#FAF7F2`, `#4A3428`, `#A58B78`)
+
+---
+
+## Hosting Architecture
+
+- **Frontend:** Vercel Free (Single Page Application with SPA routing and edge CDN caching)
+- **Backend:** Vercel Services / Serverless Functions (`/api` handler) or persistent Node.js server
+- **Database:** Neon PostgreSQL Free (`DATABASE_URL` with SSL connection pooling)
 
 ---
 
@@ -18,6 +26,7 @@ A real-time, bilingual (English & Gujarati) salon queue management application d
 
 ```text
 Salon-Queue-Management/
+├── api/                        # Vercel Serverless Function entry point (/api/index.ts)
 ├── client/                     # Frontend React + Vite application
 │   ├── public/                 # Static assets & royalty-free salon photos
 │   │   ├── images/             # Salon interior & hairstyle photographs
@@ -25,7 +34,7 @@ Salon-Queue-Management/
 │   │   │   └── ATTRIBUTION.md  # Unsplash license & image documentation
 │   ├── src/
 │   │   ├── components/         # Reusable AppLayout, LanguageToggle, etc.
-│   │   ├── contexts/           # LanguageContext (EN/GU) & SocketContext
+│   │   ├── contexts/           # LanguageContext (EN/GU) & SocketContext (with fallback polling)
 │   │   ├── lib/                # api.ts (Environment-aware API & socket URLs)
 │   │   ├── locales/            # en.json & gu.json translation dictionaries
 │   │   ├── pages/              # 7 Full Screen Modules
@@ -33,23 +42,22 @@ Salon-Queue-Management/
 │   │   └── main.tsx            # Application entry
 │   ├── vercel.json             # Vercel SPA routing and asset caching configuration
 │   └── package.json
-├── server/                     # Backend Express + Socket.IO application
+├── server/                     # Backend Express + PostgreSQL / Socket.IO application
 │   ├── src/
-│   │   ├── config/             # SQLite connection (WAL mode) & env loader
+│   │   ├── config/             # PostgreSQL connection pool (pg.Pool) & env loader
 │   │   ├── routes/             # REST API routers (health, salon, queue)
 │   │   ├── sockets/            # Socket.IO event broadcaster
 │   │   ├── app.ts              # Express middleware, CORS & route mounting
 │   │   └── index.ts            # HTTP server bootstrap
-│   ├── data/                   # SQLite database storage directory
+│   ├── backup/                 # Archived SQLite backup snapshots
 │   └── package.json
 ├── docs/                       # Project specifications
 │   ├── 01-brief.md             # Problem statement, objectives, scope boundaries
 │   ├── 02-screens.md           # 7-Screen UI/UX comprehensive specification
 │   └── 03-flows-rules.md       # 11 Queue rules, wait-time formula, 16 test cases
-├── render.yaml                 # Render Infrastructure-as-Code with Persistent Disk
 ├── .env.example                # Documented environment variables template
 ├── AGENTS.md                   # Agent development guidelines
-├── package.json                # Root concurrently runner
+├── package.json                # Root runner scripts
 └── README.md                   # This project guide
 ```
 
@@ -75,6 +83,13 @@ cp .env.example server/.env
 cp .env.example client/.env
 ```
 
+To connect to your Neon PostgreSQL database:
+Set `DATABASE_URL` in `server/.env`:
+```env
+DATABASE_URL=postgresql://neondb_owner:npg_password@ep-sample-pool-123456.us-east-2.aws.neon.tech/neondb?sslmode=require
+```
+*(If left empty, the server automatically uses local SQLite in WAL mode for zero-setup local offline development).*
+
 ### 3. Start Local Servers
 Run both backend (port 5000) and frontend (port 5173) concurrently:
 ```bash
@@ -93,81 +108,49 @@ npm run dev
 
 ---
 
-## Production Deployment Guide
+## Database Migration & Compatibility (Neon PostgreSQL)
 
-The application is architectured for deployment across two modern hosting platforms:
-- **Frontend (Client):** Vercel (Global Edge CDN for fast single-page app delivery)
-- **Backend (Server):** Render (Node.js Web Service with WebSocket & Persistent Disk support)
-
----
-
-### Step 1: Deploy Backend on Render
-
-1. Log in to your [Render Dashboard](https://dashboard.render.com/).
-2. Click **New +** $\rightarrow$ **Web Service** (or connect via Blueprint using `render.yaml`).
-3. Connect your Git repository.
-4. Configure the Web Service settings:
-   - **Name:** `salon-queue-server`
-   - **Root Directory:** `server`
-   - **Environment:** `Node`
-   - **Build Command:** `npm install && npm run build`
-   - **Start Command:** `npm run start`
-   - **Health Check Path:** `/api/health`
-5. Configure Environment Variables:
-   - `NODE_ENV`: `production`
-   - `PORT`: `10000` (Render defaults to 10000)
-   - `DB_PATH`: `/var/data/salon_queue.sqlite`
-   - `CLIENT_URL`: `https://your-salon-frontend.vercel.app` (Set to your actual Vercel domain)
-6. **Crucial — Persistent Disk Setup:**
-   - Under the service settings, navigate to **Disks** $\rightarrow$ **Add Disk**.
-   - **Name:** `salon-sqlite-data`
-   - **Mount Path:** `/var/data`
-   - **Size:** `1 GB`
-   > **Why a Persistent Disk is Required:** SQLite writes to a local file. Free/ephemeral server instances lose their filesystem state on restart or redeployment. Attaching a persistent disk ensures your salon tickets, barbers, services, and daily statistics survive restarts indefinitely.
-7. Click **Create Web Service**. Note your deployed backend URL (e.g. `https://salon-queue-server.onrender.com`).
+1. **Schema & Tables:**
+   - `services`: Salon services, bilingual names (`name_en`, `name_gu`), duration, price, active state.
+   - `barbers`: Barber roster, chairs (`Chair 1`..`4`), specialization, on-duty, on-break.
+   - `queue_tickets`: Tokens (`S-01`), customer name, phone, preferred/assigned barber, service IDs, timestamps, status (`Waiting`, `Called`, `In Chair`, `Done`, `Cancelled`, `No-show`).
+   - `settings`: Salon settings (`queue_open`, `closing_time`).
+2. **Automatic Initialization:**
+   - When the backend connects to Neon PostgreSQL, tables and default seed data are created automatically if not already present.
+3. **Data Safety:**
+   - All SQL queries use safe parameterized placeholders (`$1, $2, ...`) via `pg.Pool`.
+   - SQLite data was safely backed up prior to migration at `server/backup/data_sqlite_backup_20261124_211413`.
 
 ---
+
+## Production Deployment to Vercel
+
+### Step 1: Create Free Database on Neon
+1. Go to [https://neon.tech](https://neon.tech) and create a free project (`neondb`).
+2. Copy your connection string (`postgresql://neondb_owner:password@ep-xyz.neon.tech/neondb?sslmode=require`).
 
 ### Step 2: Deploy Frontend on Vercel
+1. Import the repository into Vercel.
+2. Set Root Directory to `client`.
+3. Framework Preset: `Vite`.
+4. Set Environment Variables:
+   - `VITE_API_URL`: Your deployed backend URL.
+   - `VITE_SOCKET_URL`: Your deployed backend URL.
+5. Deploy.
 
-1. Log in to your [Vercel Dashboard](https://vercel.com/).
-2. Click **Add New...** $\rightarrow$ **Project**.
-3. Import your Git repository.
-4. Configure project settings:
-   - **Framework Preset:** `Vite`
-   - **Root Directory:** Edit and select `client`
-   - **Build Command:** `npm run build`
-   - **Output Directory:** `dist`
-5. Configure Environment Variables in Vercel:
-   - `VITE_API_URL`: `https://salon-queue-server.onrender.com` (Your Render backend URL)
-   - `VITE_SOCKET_URL`: `https://salon-queue-server.onrender.com` (Your Render backend URL)
-6. Click **Deploy**.
-7. Vercel automatically honors `client/vercel.json`, ensuring all client-side routes (`/join`, `/status/:id`, `/reception`, `/barber/:name`, `/display`, `/admin`) resolve to `index.html` on direct URL access or page refresh.
-
----
-
-### Step 3: Complete CORS Handshake
-After Vercel assigns your production URL (e.g., `https://salon-queue-management.vercel.app`):
-1. Go back to Render $\rightarrow$ `salon-queue-server` $\rightarrow$ **Environment**.
-2. Update `CLIENT_URL` to match your Vercel URL.
-3. Save changes. Render will redeploy with the updated CORS policy.
+### Step 3: Deploy Backend on Vercel
+1. Import the repository or deploy the API root.
+2. Set Environment Variables:
+   - `DATABASE_URL`: Your Neon PostgreSQL connection string.
+   - `CLIENT_URL`: Your deployed frontend Vercel URL.
+   - `NODE_ENV`: `production`.
+3. Deploy.
 
 ---
 
-## 7 Application Screens Summary
+## Socket.IO & Vercel Serverless Architecture Note
 
-| # | Screen | Route | Target User | Key Functionality |
-|---|---|---|---|---|
-| 1 | **Home** | `/` | Customers | Live queue volume, ETA, barber availability badges, photo service catalog |
-| 2 | **Join Queue** | `/join` | Customers | 1–3 service picker, barber preference, 10-digit phone regex, token generation |
-| 3 | **My Status** | `/status/:id` | Customers | Live token tracking, FCFS wait countdown, "Start Coming" (#2) and "Your Turn" alerts |
-| 4 | **Reception** | `/reception` | Receptionists | Station overview, Call Next, No-Show, Cancel spot, walk-in registration, >60m alert |
-| 5 | **Barber View** | `/barber/:name` | Barbers | Station timer stopwatch, Start/Done controls, single-chair limit, Break toggle |
-| 6 | **Waiting TV** | `/display` | Lounge / TV | 16:9 large display, Now Serving chairs, top 5 Up Next tokens, 10s gold flash chime |
-| 7 | **Owner Settings** | `/admin` | Salon Owner | Service CRUD, barber duty roster, online queue master switch, daily analytics |
-
----
-
-## Licences & Attributions
-
-All photographic assets stored in `client/public/images/` are licensed under the **Unsplash Free Licence** (royalty-free for commercial & personal use). Detailed attribution is documented in [`client/public/images/ATTRIBUTION.md`](client/public/images/ATTRIBUTION.md).
+Vercel Functions are stateless and serverless. Standard WebSocket connections (`ws://`) terminate when serverless execution finishes. 
+To guarantee 100% reliable real-time synchronization on Vercel:
+- **Dual-Sync Strategy:** The frontend features automated reactive polling fallback (every 4 seconds) whenever a persistent WebSocket connection is inactive.
+- If WebSocket connections are active (e.g. local development or persistent Node.js hosting), events trigger instantly. In serverless environments, state updates synchronize within 4 seconds without user interaction or manual page refreshes.

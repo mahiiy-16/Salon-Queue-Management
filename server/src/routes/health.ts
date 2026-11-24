@@ -3,14 +3,14 @@ import { checkDatabaseHealth } from '../config/db.js';
 
 export const healthRouter = Router();
 
-healthRouter.get('/health', (_req: Request, res: Response) => {
-  const dbHealthy = checkDatabaseHealth();
+healthRouter.get('/health', async (_req: Request, res: Response) => {
+  const dbStatus = await checkDatabaseHealth();
   
-  res.status(dbHealthy ? 200 : 503).json({
-    status: dbHealthy ? 'healthy' : 'unhealthy',
+  res.status(dbStatus.healthy ? 200 : 503).json({
+    status: dbStatus.healthy ? 'healthy' : 'unhealthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    database: dbHealthy ? 'connected (SQLite WAL)' : 'disconnected',
+    database: dbStatus.healthy ? `connected (${dbStatus.type})` : 'disconnected',
     service: 'Salon Queue Management API'
   });
 });

@@ -1,59 +1,51 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../config/db.js';
-import { getIO } from '../sockets/socket.js';
+import { query, queryOne } from '../config/db.js';
 import crypto from 'crypto';
 
 export const queueRouter = Router();
 
 // Helper: Calculate wait time and position for a specific ticket according to docs/03-flows-rules.md Section 5
-function calculateTicketWaitTime(ticket: any): { position: number; waitTime: number } {
-  // If ticket is not in Waiting status, position/wait time are 0
+async function calculateTicketWaitTime(ticket: any): Promise<{ position: number; waitTime: number }> {
   if (ticket.status !== 'Waiting') {
     return { position: 0, waitTime: 0 };
   }
 
   // 1. Fetch all active waiting tickets ordered by created_at strictly (FCFS)
-  const waitingTickets = db.prepare(`
+  const { rows: waitingTickets } = await query(`
     SELECT * FROM queue_tickets 
     WHERE status = 'Waiting' 
     ORDER BY created_at ASC
-  `).all() as any[];
+  `);
 
-  // Find index of this ticket
   const ticketIndex = waitingTickets.findIndex((t) => t.id === ticket.id || t.token === ticket.token);
   const position = ticketIndex >= 0 ? ticketIndex + 1 : 1;
 
   // Active barbers working (is_on_duty = 1 AND is_on_break = 0)
-  const workingBarbers = db.prepare(`
+  const workingBarbers = await queryOne<{ count: string | number }>(`
     SELECT COUNT(*) as count 
     FROM barbers 
     WHERE is_on_duty = 1 AND is_on_break = 0
-  `).get() as { count: number };
-  const numBarbers = Math.max(1, workingBarbers.count);
+  `);
+  const numBarbers = Math.max(1, parseInt(String(workingBarbers?.count || 1), 10));
 
-  // Tickets ahead of this ticket in chronological order
   const ticketsAhead = ticketIndex > 0 ? waitingTickets.slice(0, ticketIndex) : [];
 
-  // Wait time calculation per docs/03-flows-rules.md Section 5:
-  // For "Any Barber": Wait Time = Total Duration of Services Ahead / Number of Barbers Working
-  // For "Specific Barber": Wait Time = Total Duration of Services Ahead for this barber or Any / 1
   if (ticket.preferred_barber === 'any') {
-    const durationAhead = ticketsAhead.reduce((sum, t) => sum + (t.total_duration || 0), 0);
+    const durationAhead = ticketsAhead.reduce((sum, t) => sum + (parseInt(String(t.total_duration), 10) || 0), 0);
     const waitTime = ticketIndex === 0 ? 5 : Math.max(5, Math.ceil(durationAhead / numBarbers));
     return { position, waitTime };
   } else {
-    // Specific barber queue: customers ahead requesting this barber OR "any"
     const specificAhead = ticketsAhead.filter(
       (t) => t.preferred_barber === ticket.preferred_barber || t.preferred_barber === 'any'
     );
-    const durationAhead = specificAhead.reduce((sum, t) => sum + (t.total_duration || 0), 0);
+    const durationAhead = specificAhead.reduce((sum, t) => sum + (parseInt(String(t.total_duration), 10) || 0), 0);
     const waitTime = ticketIndex === 0 ? 10 : Math.max(5, durationAhead);
     return { position, waitTime };
   }
 }
 
 // POST /api/queue/join
-queueRouter.post('/join', (req: Request, res: Response) => {
+queueRouter.post('/join', async (req: Request, res: Response) => {
   try {
     const { customerName, phone, serviceIds, preferredBarber } = req.body;
 
@@ -77,10 +69,10 @@ queueRouter.post('/join', (req: Request, res: Response) => {
     }
 
     // 4. Rule 5: One active queue spot per phone number
-    const activeTicket = db.prepare(`
+    const activeTicket = await queryOne(`
       SELECT id, token, status FROM queue_tickets 
-      WHERE phone = ? AND status IN ('Waiting', 'Called', 'In Chair')
-    `).get(cleanPhone) as any;
+      WHERE phone = $1 AND status IN ('Waiting', 'Called', 'In Chair')
+    `, [cleanPhone]);
 
     if (activeTicket) {
       res.status(400).json({
@@ -92,47 +84,46 @@ queueRouter.post('/join', (req: Request, res: Response) => {
     }
 
     // 5. Rule 9 & 10: Online queue cutoff (check if open)
-    // Walk-ins registered by receptionist (isWalkIn: true) remain permitted even when online queue is closed
     const { isWalkIn } = req.body;
-    const queueSetting = db.prepare("SELECT value FROM settings WHERE key = 'queue_open'").get() as { value: string } | undefined;
+    const queueSetting = await queryOne<{ value: string }>("SELECT value FROM settings WHERE key = 'queue_open'");
     if (queueSetting && queueSetting.value === 'false' && !isWalkIn) {
       res.status(400).json({ error: 'The salon queue is currently closed to new entries.' });
       return;
     }
 
     // 6. Fetch services from database and compute duration & price
-    const placeholders = serviceIds.map(() => '?').join(',');
-    const services = db.prepare(`SELECT * FROM services WHERE id IN (${placeholders})`).all(...serviceIds) as any[];
+    const placeholders = serviceIds.map((_, idx) => `$${idx + 1}`).join(',');
+    const { rows: services } = await query(`SELECT * FROM services WHERE id IN (${placeholders})`, serviceIds);
 
     if (services.length !== serviceIds.length) {
       res.status(400).json({ error: 'One or more selected services are invalid.' });
       return;
     }
 
-    const totalDuration = services.reduce((sum, s) => sum + s.duration, 0);
-    const totalPrice = services.reduce((sum, s) => sum + s.price, 0);
+    const totalDuration = services.reduce((sum, s) => sum + parseInt(String(s.duration), 10), 0);
+    const totalPrice = services.reduce((sum, s) => sum + parseFloat(String(s.price)), 0);
 
     // 7. Generate daily sequential token (e.g. S-01, S-02)
-    const countResult = db.prepare(`
+    const todayStr = new Date().toISOString().split('T')[0];
+    const countResult = await queryOne<{ count: string | number }>(`
       SELECT COUNT(*) as count 
       FROM queue_tickets 
-      WHERE DATE(created_at) = DATE('now')
-    `).get() as { count: number };
+      WHERE DATE(created_at) = DATE($1)
+    `, [todayStr]);
 
-    const tokenNumber = (countResult.count + 1).toString().padStart(2, '0');
+    const countNum = parseInt(String(countResult?.count || 0), 10);
+    const tokenNumber = (countNum + 1).toString().padStart(2, '0');
     const token = `S-${tokenNumber}`;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
 
-    // 8. Insert ticket into SQLite
-    const insertStmt = db.prepare(`
+    // 8. Insert ticket into database
+    await query(`
       INSERT INTO queue_tickets (
         id, token, customer_name, phone, preferred_barber, 
         service_ids, total_duration, total_price, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Waiting', ?)
-    `);
-
-    insertStmt.run(
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Waiting', $9)
+    `, [
       id,
       token,
       customerName.trim(),
@@ -142,18 +133,17 @@ queueRouter.post('/join', (req: Request, res: Response) => {
       totalDuration,
       totalPrice,
       createdAt
-    );
+    ]);
 
     // 9. Calculate initial queue position and wait time
-    const createdTicket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
-    const { position, waitTime } = calculateTicketWaitTime(createdTicket);
+    const createdTicket = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [id]);
+    const { position, waitTime } = await calculateTicketWaitTime(createdTicket);
 
     // 10. Broadcast real-time update
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', { type: 'TICKET_CREATED', token, id });
-    } catch {
-      // Socket not active in standalone test mode
-    }
+    } catch {}
 
     res.status(201).json({
       success: true,
@@ -170,34 +160,42 @@ queueRouter.post('/join', (req: Request, res: Response) => {
 });
 
 // GET /api/queue/ticket/:idOrToken
-queueRouter.get('/ticket/:idOrToken', (req: Request, res: Response) => {
+queueRouter.get('/ticket/:idOrToken', async (req: Request, res: Response) => {
   try {
     const { idOrToken } = req.params;
 
-    const ticket = db.prepare(`
+    const ticket = await queryOne(`
       SELECT * FROM queue_tickets 
-      WHERE id = ? OR token = ?
-    `).get(idOrToken, idOrToken) as any;
+      WHERE id = $1 OR token = $2
+    `, [idOrToken, idOrToken]);
 
     if (!ticket) {
       res.status(404).json({ error: 'Queue ticket not found.' });
       return;
     }
 
-    const { position, waitTime } = calculateTicketWaitTime(ticket);
+    const { position, waitTime } = await calculateTicketWaitTime(ticket);
 
     // Fetch service objects
     const serviceIds = JSON.parse(ticket.service_ids || '[]');
     let services: any[] = [];
     if (serviceIds.length > 0) {
-      const placeholders = serviceIds.map(() => '?').join(',');
-      services = db.prepare(`SELECT * FROM services WHERE id IN (${placeholders})`).all(...serviceIds);
+      const placeholders = serviceIds.map((_: any, idx: number) => `$${idx + 1}`).join(',');
+      const resServices = await query(`SELECT * FROM services WHERE id IN (${placeholders})`, serviceIds);
+      services = resServices.rows.map((s) => ({
+        ...s,
+        duration: parseInt(String(s.duration), 10),
+        price: parseFloat(String(s.price))
+      }));
     }
 
     // Preferred barber name
     let barberName = 'Any Barber (Fastest)';
     if (ticket.preferred_barber && ticket.preferred_barber !== 'any') {
-      const barber = db.prepare('SELECT name, chair FROM barbers WHERE id = ?').get(ticket.preferred_barber) as any;
+      const barber = await queryOne<{ name: string; chair: string }>(
+        'SELECT name, chair FROM barbers WHERE id = $1',
+        [ticket.preferred_barber]
+      );
       if (barber) {
         barberName = `${barber.name} (${barber.chair})`;
       }
@@ -219,17 +217,16 @@ queueRouter.get('/ticket/:idOrToken', (req: Request, res: Response) => {
 });
 
 // GET /api/queue/barber/:barberId
-// Station view for a specific barber: current customer (In Chair or Called), and up-next line
-queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
+queueRouter.get('/barber/:barberId', async (req: Request, res: Response) => {
   try {
     const { barberId } = req.params;
     const cleanId = barberId.toLowerCase().trim();
 
     // Verify barber
-    const barber = db.prepare(`
+    const barber = await queryOne(`
       SELECT * FROM barbers 
-      WHERE id = ? OR LOWER(name) LIKE ?
-    `).get(cleanId, `%${cleanId}%`) as any;
+      WHERE id = $1 OR LOWER(name) LIKE $2
+    `, [cleanId, `%${cleanId}%`]);
 
     if (!barber) {
       res.status(404).json({ error: 'Barber not found.' });
@@ -237,27 +234,30 @@ queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
     }
 
     // 1. Current serving customer: Status 'In Chair' or 'Called' assigned to this barber
-    const currentTicket = db.prepare(`
+    const currentTicket = await queryOne(`
       SELECT * FROM queue_tickets 
-      WHERE assigned_barber = ? AND status IN ('In Chair', 'Called')
+      WHERE assigned_barber = $1 AND status IN ('In Chair', 'Called')
       ORDER BY 
         CASE status 
           WHEN 'In Chair' THEN 1 
           WHEN 'Called' THEN 2 
         END ASC, created_at ASC
       LIMIT 1
-    `).get(barber.id) as any;
+    `, [barber.id]);
 
     // Services map
-    const services = db.prepare('SELECT id, name_en, name_gu, duration, price FROM services').all() as any[];
-    const serviceMap = new Map(services.map((s) => [s.id, s]));
+    const { rows: services } = await query('SELECT id, name_en, name_gu, duration, price FROM services');
+    const serviceMap = new Map(services.map((s) => [s.id, {
+      ...s,
+      duration: parseInt(String(s.duration), 10),
+      price: parseFloat(String(s.price))
+    }]));
 
     let currentCustomer = null;
     if (currentTicket) {
       const sIds = JSON.parse(currentTicket.service_ids || '[]');
       const ticketServices = sIds.map((id: number) => serviceMap.get(id)).filter(Boolean);
 
-      // Elapsed service seconds if In Chair
       let elapsedSeconds = 0;
       if (currentTicket.status === 'In Chair' && currentTicket.started_at) {
         elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(currentTicket.started_at).getTime()) / 1000));
@@ -271,12 +271,11 @@ queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
     }
 
     // 2. Up next queue line:
-    // Strictly customers assigned to this barber OR waiting customers selecting this barber OR selecting 'any' (FCFS)
-    const waitingTickets = db.prepare(`
+    const { rows: waitingTickets } = await query(`
       SELECT * FROM queue_tickets 
-      WHERE status = 'Waiting' AND (preferred_barber = ? OR preferred_barber = 'any')
+      WHERE status = 'Waiting' AND (preferred_barber = $1 OR preferred_barber = 'any')
       ORDER BY created_at ASC
-    `).all(barber.id) as any[];
+    `, [barber.id]);
 
     const enrichedUpNext = waitingTickets.map((t) => {
       const sIds = JSON.parse(t.service_ids || '[]');
@@ -290,10 +289,13 @@ queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
       };
     });
 
+    const isBreak = parseInt(String(barber.is_on_break), 10) === 1;
+    const isDuty = parseInt(String(barber.is_on_duty), 10) === 1;
+
     res.json({
       barber: {
         ...barber,
-        status: barber.is_on_break === 1 ? 'break' : barber.is_on_duty === 1 ? 'available' : 'off'
+        status: isBreak ? 'break' : isDuty ? 'available' : 'off'
       },
       currentCustomer,
       upNext: enrichedUpNext,
@@ -305,13 +307,11 @@ queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
 });
 
 // POST /api/queue/ticket/:id/start
-// Changes customer status from 'Called' to 'In Chair' and starts live timer
-// Rule 4: Prevent starting another customer while chair is already occupied
-queueRouter.post('/ticket/:id/start', (req: Request, res: Response) => {
+queueRouter.post('/ticket/:id/start', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const ticket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    const ticket = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [id]);
     if (!ticket) {
       res.status(404).json({ error: 'Ticket not found.' });
       return;
@@ -326,10 +326,10 @@ queueRouter.post('/ticket/:id/start', (req: Request, res: Response) => {
 
     // Check Rule 4: Barber can only have ONE customer in chair
     if (ticket.assigned_barber) {
-      const existingInChair = db.prepare(`
+      const existingInChair = await queryOne(`
         SELECT * FROM queue_tickets 
-        WHERE assigned_barber = ? AND status = 'In Chair' AND id != ?
-      `).get(ticket.assigned_barber, id) as any;
+        WHERE assigned_barber = $1 AND status = 'In Chair' AND id != $2
+      `, [ticket.assigned_barber, id]);
 
       if (existingInChair) {
         res.status(400).json({
@@ -340,24 +340,23 @@ queueRouter.post('/ticket/:id/start', (req: Request, res: Response) => {
     }
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await query(`
       UPDATE queue_tickets 
-      SET status = 'In Chair', started_at = ? 
-      WHERE id = ?
-    `).run(now, id);
+      SET status = 'In Chair', started_at = $1 
+      WHERE id = $2
+    `, [now, id]);
 
-    const updated = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    const updated = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [id]);
 
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', {
         type: 'SERVICE_STARTED',
         ticketId: id,
         token: updated.token,
         barberId: updated.assigned_barber
       });
-    } catch {
-      // Socket optional
-    }
+    } catch {}
 
     res.json({ success: true, ticket: updated, message: `Service started for ${updated.customer_name} (${updated.token})` });
   } catch (error: any) {
@@ -366,12 +365,11 @@ queueRouter.post('/ticket/:id/start', (req: Request, res: Response) => {
 });
 
 // POST /api/queue/ticket/:id/done
-// Changes customer status from 'In Chair' to 'Done'
-queueRouter.post('/ticket/:id/done', (req: Request, res: Response) => {
+queueRouter.post('/ticket/:id/done', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const ticket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    const ticket = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [id]);
     if (!ticket) {
       res.status(404).json({ error: 'Ticket not found.' });
       return;
@@ -385,24 +383,23 @@ queueRouter.post('/ticket/:id/done', (req: Request, res: Response) => {
     }
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await query(`
       UPDATE queue_tickets 
-      SET status = 'Done', completed_at = ? 
-      WHERE id = ?
-    `).run(now, id);
+      SET status = 'Done', completed_at = $1 
+      WHERE id = $2
+    `, [now, id]);
 
-    const updated = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    const updated = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [id]);
 
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', {
         type: 'SERVICE_COMPLETED',
         ticketId: id,
         token: updated.token,
         barberId: updated.assigned_barber
       });
-    } catch {
-      // Socket optional
-    }
+    } catch {}
 
     res.json({ success: true, ticket: updated, message: `Service completed for ${updated.customer_name} (${updated.token})` });
   } catch (error: any) {
@@ -410,24 +407,27 @@ queueRouter.post('/ticket/:id/done', (req: Request, res: Response) => {
   }
 });
 
-// GET /api/queue/all (Live waiting and in-service tickets for Reception & TV)
-queueRouter.get('/all', (_req: Request, res: Response) => {
+// GET /api/queue/all
+queueRouter.get('/all', async (_req: Request, res: Response) => {
   try {
-    const tickets = db.prepare(`
+    const { rows: tickets } = await query(`
       SELECT * FROM queue_tickets 
       WHERE status IN ('Waiting', 'Called', 'In Chair')
       ORDER BY created_at ASC
-    `).all() as any[];
+    `);
 
-    // Fetch all active barbers & services to enrich data
-    const barbers = db.prepare('SELECT id, name, chair FROM barbers').all() as any[];
+    const { rows: barbers } = await query('SELECT id, name, chair FROM barbers');
     const barberMap = new Map(barbers.map((b) => [b.id, b]));
 
-    const services = db.prepare('SELECT id, name_en, name_gu, duration, price FROM services').all() as any[];
-    const serviceMap = new Map(services.map((s) => [s.id, s]));
+    const { rows: services } = await query('SELECT id, name_en, name_gu, duration, price FROM services');
+    const serviceMap = new Map(services.map((s) => [s.id, {
+      ...s,
+      duration: parseInt(String(s.duration), 10),
+      price: parseFloat(String(s.price))
+    }]));
 
-    const enrichedTickets = tickets.map((t) => {
-      const { position, waitTime } = calculateTicketWaitTime(t);
+    const enrichedTickets = await Promise.all(tickets.map(async (t) => {
+      const { position, waitTime } = await calculateTicketWaitTime(t);
       const sIds = JSON.parse(t.service_ids || '[]');
       const ticketServices = sIds.map((id: number) => serviceMap.get(id)).filter(Boolean);
 
@@ -443,7 +443,6 @@ queueRouter.get('/all', (_req: Request, res: Response) => {
         if (b) assignedBarberName = `${b.name} (${b.chair})`;
       }
 
-      // Calculate elapsed waiting time in minutes
       const createdTime = new Date(t.created_at).getTime();
       const now = Date.now();
       const elapsedMinutes = Math.floor((now - createdTime) / (1000 * 60));
@@ -459,7 +458,7 @@ queueRouter.get('/all', (_req: Request, res: Response) => {
         elapsedMinutes,
         isOverdue: elapsedMinutes >= 60 && t.status === 'Waiting'
       };
-    });
+    }));
 
     res.json(enrichedTickets);
   } catch (error: any) {
@@ -468,9 +467,7 @@ queueRouter.get('/all', (_req: Request, res: Response) => {
 });
 
 // POST /api/queue/call-next
-// Rule 2 & 3: Calls earliest customer requesting this barber OR "any"
-// Rule 4: One customer per chair (cannot call if barber's chair is currently occupied in "In Chair" status)
-queueRouter.post('/call-next', (req: Request, res: Response) => {
+queueRouter.post('/call-next', async (req: Request, res: Response) => {
   try {
     const { barberId } = req.body;
     if (!barberId) {
@@ -478,17 +475,17 @@ queueRouter.post('/call-next', (req: Request, res: Response) => {
       return;
     }
 
-    const barber = db.prepare('SELECT * FROM barbers WHERE id = ?').get(barberId) as any;
+    const barber = await queryOne('SELECT * FROM barbers WHERE id = $1', [barberId]);
     if (!barber) {
       res.status(404).json({ error: 'Barber not found.' });
       return;
     }
 
     // Check Rule 4: One customer per chair
-    const occupied = db.prepare(`
+    const occupied = await queryOne(`
       SELECT * FROM queue_tickets 
-      WHERE assigned_barber = ? AND status = 'In Chair'
-    `).get(barberId) as any;
+      WHERE assigned_barber = $1 AND status = 'In Chair'
+    `, [barberId]);
 
     if (occupied) {
       res.status(400).json({
@@ -497,13 +494,11 @@ queueRouter.post('/call-next', (req: Request, res: Response) => {
       return;
     }
 
-    // If barber has a Called customer waiting to sit down, return that or allow re-calling
-    // Scan waiting queue strictly in chronological order (FCFS)
-    const waitingTickets = db.prepare(`
+    const { rows: waitingTickets } = await query(`
       SELECT * FROM queue_tickets 
       WHERE status = 'Waiting' 
       ORDER BY created_at ASC
-    `).all() as any[];
+    `);
 
     // Rule 2 & 3: Match earliest customer where preferred_barber == barberId OR preferred_barber == 'any'
     const targetTicket = waitingTickets.find(
@@ -516,15 +511,16 @@ queueRouter.post('/call-next', (req: Request, res: Response) => {
     }
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await query(`
       UPDATE queue_tickets 
-      SET status = 'Called', assigned_barber = ?, called_at = ?
-      WHERE id = ?
-    `).run(barberId, now, targetTicket.id);
+      SET status = 'Called', assigned_barber = $1, called_at = $2
+      WHERE id = $3
+    `, [barberId, now, targetTicket.id]);
 
-    const updatedTicket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(targetTicket.id) as any;
+    const updatedTicket = await queryOne('SELECT * FROM queue_tickets WHERE id = $1', [targetTicket.id]);
 
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', {
         type: 'CUSTOMER_CALLED',
         id: updatedTicket.id,
@@ -533,9 +529,7 @@ queueRouter.post('/call-next', (req: Request, res: Response) => {
         barberName: barber.name,
         chair: barber.chair
       });
-    } catch {
-      // Socket not active in standalone test
-    }
+    } catch {}
 
     res.json({
       success: true,
@@ -548,15 +542,14 @@ queueRouter.post('/call-next', (req: Request, res: Response) => {
 });
 
 // POST /api/queue/ticket/:idOrToken/noshow
-// Rule 7 & 8: Mark customer No-show if called and not present
-queueRouter.post('/ticket/:idOrToken/noshow', (req: Request, res: Response) => {
+queueRouter.post('/ticket/:idOrToken/noshow', async (req: Request, res: Response) => {
   try {
     const { idOrToken } = req.params;
 
-    const ticket = db.prepare(`
+    const ticket = await queryOne(`
       SELECT * FROM queue_tickets 
-      WHERE id = ? OR token = ?
-    `).get(idOrToken, idOrToken) as any;
+      WHERE id = $1 OR token = $2
+    `, [idOrToken, idOrToken]);
 
     if (!ticket) {
       res.status(404).json({ error: 'Queue ticket not found.' });
@@ -568,13 +561,12 @@ queueRouter.post('/ticket/:idOrToken/noshow', (req: Request, res: Response) => {
       return;
     }
 
-    db.prepare("UPDATE queue_tickets SET status = 'No-show' WHERE id = ?").run(ticket.id);
+    await query("UPDATE queue_tickets SET status = 'No-show' WHERE id = $1", [ticket.id]);
 
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', { type: 'TICKET_NOSHOW', id: ticket.id, token: ticket.token });
-    } catch {
-      // Socket not active
-    }
+    } catch {}
 
     res.json({ success: true, message: `Ticket ${ticket.token} marked as No-show.` });
   } catch (error: any) {
@@ -583,14 +575,14 @@ queueRouter.post('/ticket/:idOrToken/noshow', (req: Request, res: Response) => {
 });
 
 // POST /api/queue/ticket/:idOrToken/cancel
-queueRouter.post('/ticket/:idOrToken/cancel', (req: Request, res: Response) => {
+queueRouter.post('/ticket/:idOrToken/cancel', async (req: Request, res: Response) => {
   try {
     const { idOrToken } = req.params;
 
-    const ticket = db.prepare(`
+    const ticket = await queryOne(`
       SELECT * FROM queue_tickets 
-      WHERE id = ? OR token = ?
-    `).get(idOrToken, idOrToken) as any;
+      WHERE id = $1 OR token = $2
+    `, [idOrToken, idOrToken]);
 
     if (!ticket) {
       res.status(404).json({ error: 'Queue ticket not found.' });
@@ -602,13 +594,12 @@ queueRouter.post('/ticket/:idOrToken/cancel', (req: Request, res: Response) => {
       return;
     }
 
-    db.prepare("UPDATE queue_tickets SET status = 'Cancelled' WHERE id = ?").run(ticket.id);
+    await query("UPDATE queue_tickets SET status = 'Cancelled' WHERE id = $1", [ticket.id]);
 
     try {
+      const { getIO } = await import('../sockets/socket.js');
       getIO().emit('queue:updated', { type: 'TICKET_CANCELLED', id: ticket.id, token: ticket.token });
-    } catch {
-      // Socket not active in standalone test mode
-    }
+    } catch {}
 
     res.json({ success: true, message: 'Ticket cancelled successfully.' });
   } catch (error: any) {
