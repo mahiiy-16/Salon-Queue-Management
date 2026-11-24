@@ -1,8 +1,14 @@
+import dns from 'dns';
 import pg from 'pg';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { ENV } from './env.js';
+
+// Prioritize IPv4 resolution to prevent dual-stack IPv6 timeout issues with cloud databases
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 const { Pool } = pg;
 

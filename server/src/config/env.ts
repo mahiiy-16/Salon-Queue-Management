@@ -3,6 +3,7 @@ import path from 'path';
 
 // Load .env from project root or server directory
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config();
 
 // Helper to parse allowed CORS origins from CLIENT_URL (supports comma-separated list of domains)
