@@ -59,7 +59,7 @@ salonRouter.get('/services', (_req: Request, res: Response) => {
   }
 });
 
-// GET /api/barbers
+// GET /api/salon/barbers
 salonRouter.get('/barbers', (_req: Request, res: Response) => {
   try {
     const barbers = db.prepare('SELECT * FROM barbers ORDER BY chair ASC').all() as any[];
@@ -80,6 +80,69 @@ salonRouter.get('/barbers', (_req: Request, res: Response) => {
     });
 
     res.json(enrichedBarbers);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/salon/barbers/:idOrName
+salonRouter.get('/barbers/:idOrName', (req: Request, res: Response) => {
+  try {
+    const { idOrName } = req.params;
+    const cleanParam = idOrName.toLowerCase().trim();
+
+    const barber = db.prepare(`
+      SELECT * FROM barbers 
+      WHERE id = ? OR LOWER(name) LIKE ?
+    `).get(cleanParam, `%${cleanParam}%`) as any;
+
+    if (!barber) {
+      res.status(404).json({ error: 'Barber not found.' });
+      return;
+    }
+
+    res.json({
+      ...barber,
+      status: barber.is_on_break === 1 ? 'break' : barber.is_on_duty === 1 ? 'available' : 'off'
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH /api/salon/barbers/:id/status
+// Toggle break / availability
+salonRouter.patch('/barbers/:id/status', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { is_on_break, is_on_duty } = req.body;
+
+    const barber = db.prepare('SELECT * FROM barbers WHERE id = ?').get(id) as any;
+    if (!barber) {
+      res.status(404).json({ error: 'Barber not found.' });
+      return;
+    }
+
+    if (typeof is_on_break === 'number' || typeof is_on_break === 'boolean') {
+      const breakVal = is_on_break === true || is_on_break === 1 ? 1 : 0;
+      db.prepare('UPDATE barbers SET is_on_break = ? WHERE id = ?').run(breakVal, id);
+    }
+
+    if (typeof is_on_duty === 'number' || typeof is_on_duty === 'boolean') {
+      const dutyVal = is_on_duty === true || is_on_duty === 1 ? 1 : 0;
+      db.prepare('UPDATE barbers SET is_on_duty = ? WHERE id = ?').run(dutyVal, id);
+    }
+
+    const updated = db.prepare('SELECT * FROM barbers WHERE id = ?').get(id) as any;
+
+    try {
+      const { getIO } = await import('../sockets/socket.js');
+      getIO().emit('queue:updated', { type: 'BARBER_STATUS_CHANGED', barberId: id });
+    } catch {
+      // Socket optional in test
+    }
+
+    res.json({ success: true, barber: updated });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

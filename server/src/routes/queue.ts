@@ -216,6 +216,198 @@ queueRouter.get('/ticket/:idOrToken', (req: Request, res: Response) => {
   }
 });
 
+// GET /api/queue/barber/:barberId
+// Station view for a specific barber: current customer (In Chair or Called), and up-next line
+queueRouter.get('/barber/:barberId', (req: Request, res: Response) => {
+  try {
+    const { barberId } = req.params;
+    const cleanId = barberId.toLowerCase().trim();
+
+    // Verify barber
+    const barber = db.prepare(`
+      SELECT * FROM barbers 
+      WHERE id = ? OR LOWER(name) LIKE ?
+    `).get(cleanId, `%${cleanId}%`) as any;
+
+    if (!barber) {
+      res.status(404).json({ error: 'Barber not found.' });
+      return;
+    }
+
+    // 1. Current serving customer: Status 'In Chair' or 'Called' assigned to this barber
+    const currentTicket = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE assigned_barber = ? AND status IN ('In Chair', 'Called')
+      ORDER BY 
+        CASE status 
+          WHEN 'In Chair' THEN 1 
+          WHEN 'Called' THEN 2 
+        END ASC, created_at ASC
+      LIMIT 1
+    `).get(barber.id) as any;
+
+    // Services map
+    const services = db.prepare('SELECT id, name_en, name_gu, duration, price FROM services').all() as any[];
+    const serviceMap = new Map(services.map((s) => [s.id, s]));
+
+    let currentCustomer = null;
+    if (currentTicket) {
+      const sIds = JSON.parse(currentTicket.service_ids || '[]');
+      const ticketServices = sIds.map((id: number) => serviceMap.get(id)).filter(Boolean);
+
+      // Elapsed service seconds if In Chair
+      let elapsedSeconds = 0;
+      if (currentTicket.status === 'In Chair' && currentTicket.started_at) {
+        elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(currentTicket.started_at).getTime()) / 1000));
+      }
+
+      currentCustomer = {
+        ...currentTicket,
+        services: ticketServices,
+        elapsedSeconds
+      };
+    }
+
+    // 2. Up next queue line:
+    // Strictly customers assigned to this barber OR waiting customers selecting this barber OR selecting 'any' (FCFS)
+    const waitingTickets = db.prepare(`
+      SELECT * FROM queue_tickets 
+      WHERE status = 'Waiting' AND (preferred_barber = ? OR preferred_barber = 'any')
+      ORDER BY created_at ASC
+    `).all(barber.id) as any[];
+
+    const enrichedUpNext = waitingTickets.map((t) => {
+      const sIds = JSON.parse(t.service_ids || '[]');
+      const ticketServices = sIds.map((id: number) => serviceMap.get(id)).filter(Boolean);
+      const elapsedMinutes = Math.floor((Date.now() - new Date(t.created_at).getTime()) / (1000 * 60));
+
+      return {
+        ...t,
+        services: ticketServices,
+        elapsedMinutes
+      };
+    });
+
+    res.json({
+      barber: {
+        ...barber,
+        status: barber.is_on_break === 1 ? 'break' : barber.is_on_duty === 1 ? 'available' : 'off'
+      },
+      currentCustomer,
+      upNext: enrichedUpNext,
+      totalWaitingCount: enrichedUpNext.length
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/queue/ticket/:id/start
+// Changes customer status from 'Called' to 'In Chair' and starts live timer
+// Rule 4: Prevent starting another customer while chair is already occupied
+queueRouter.post('/ticket/:id/start', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const ticket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    if (!ticket) {
+      res.status(404).json({ error: 'Ticket not found.' });
+      return;
+    }
+
+    if (ticket.status !== 'Called') {
+      res.status(400).json({
+        error: `Cannot start service for ticket with status '${ticket.status}'. Ticket must be 'Called' first.`
+      });
+      return;
+    }
+
+    // Check Rule 4: Barber can only have ONE customer in chair
+    if (ticket.assigned_barber) {
+      const existingInChair = db.prepare(`
+        SELECT * FROM queue_tickets 
+        WHERE assigned_barber = ? AND status = 'In Chair' AND id != ?
+      `).get(ticket.assigned_barber, id) as any;
+
+      if (existingInChair) {
+        res.status(400).json({
+          error: `Chair is already occupied by ${existingInChair.customer_name} (${existingInChair.token}). Complete service before starting a new one.`
+        });
+        return;
+      }
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE queue_tickets 
+      SET status = 'In Chair', started_at = ? 
+      WHERE id = ?
+    `).run(now, id);
+
+    const updated = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+
+    try {
+      getIO().emit('queue:updated', {
+        type: 'SERVICE_STARTED',
+        ticketId: id,
+        token: updated.token,
+        barberId: updated.assigned_barber
+      });
+    } catch {
+      // Socket optional
+    }
+
+    res.json({ success: true, ticket: updated, message: `Service started for ${updated.customer_name} (${updated.token})` });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/queue/ticket/:id/done
+// Changes customer status from 'In Chair' to 'Done'
+queueRouter.post('/ticket/:id/done', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const ticket = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+    if (!ticket) {
+      res.status(404).json({ error: 'Ticket not found.' });
+      return;
+    }
+
+    if (ticket.status !== 'In Chair') {
+      res.status(400).json({
+        error: `Cannot complete ticket with status '${ticket.status}'. Ticket must be 'In Chair'.`
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE queue_tickets 
+      SET status = 'Done', completed_at = ? 
+      WHERE id = ?
+    `).run(now, id);
+
+    const updated = db.prepare('SELECT * FROM queue_tickets WHERE id = ?').get(id) as any;
+
+    try {
+      getIO().emit('queue:updated', {
+        type: 'SERVICE_COMPLETED',
+        ticketId: id,
+        token: updated.token,
+        barberId: updated.assigned_barber
+      });
+    } catch {
+      // Socket optional
+    }
+
+    res.json({ success: true, ticket: updated, message: `Service completed for ${updated.customer_name} (${updated.token})` });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/queue/all (Live waiting and in-service tickets for Reception & TV)
 queueRouter.get('/all', (_req: Request, res: Response) => {
   try {
