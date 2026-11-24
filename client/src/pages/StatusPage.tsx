@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { AlertTriangle, Bell, ArrowLeft, Scissors, CheckCircle2, XCircle, Clock } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocket } from '../contexts/SocketContext';
+import { apiEndpoint } from '../lib/api';
 
 interface ServiceItem {
   id: number;
@@ -45,7 +46,7 @@ export const StatusPage: React.FC = () => {
 
   const fetchTicketDetails = async () => {
     try {
-      const res = await fetch(`/api/queue/ticket/${activeTicketId}`);
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${activeTicketId}`));
       if (!res.ok) {
         if (res.status === 404) {
           setNotFound(true);
@@ -82,7 +83,7 @@ export const StatusPage: React.FC = () => {
     setCancelling(true);
 
     try {
-      const res = await fetch(`/api/queue/ticket/${ticket.id}/cancel`, {
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${ticket.id}/cancel`), {
         method: 'POST'
       });
       if (res.ok) {

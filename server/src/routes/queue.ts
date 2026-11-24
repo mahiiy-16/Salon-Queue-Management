@@ -91,9 +91,11 @@ queueRouter.post('/join', (req: Request, res: Response) => {
       return;
     }
 
-    // 5. Rule 9: Online queue cutoff (check if open)
+    // 5. Rule 9 & 10: Online queue cutoff (check if open)
+    // Walk-ins registered by receptionist (isWalkIn: true) remain permitted even when online queue is closed
+    const { isWalkIn } = req.body;
     const queueSetting = db.prepare("SELECT value FROM settings WHERE key = 'queue_open'").get() as { value: string } | undefined;
-    if (queueSetting && queueSetting.value === 'false') {
+    if (queueSetting && queueSetting.value === 'false' && !isWalkIn) {
       res.status(400).json({ error: 'The salon queue is currently closed to new entries.' });
       return;
     }

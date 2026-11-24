@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Users, AlertTriangle, Plus, Scissors, CheckCircle2, Trash2, UserX } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocket } from '../contexts/SocketContext';
+import { apiEndpoint } from '../lib/api';
 
 interface Barber {
   id: string;
@@ -73,9 +74,9 @@ export const ReceptionPage: React.FC = () => {
   const fetchDashboardData = async () => {
     try {
       const [queueRes, barbersRes, servicesRes] = await Promise.all([
-        fetch('/api/queue/all'),
-        fetch('/api/salon/barbers'),
-        fetch('/api/salon/services')
+        fetch(apiEndpoint('/api/queue/all')),
+        fetch(apiEndpoint('/api/salon/barbers')),
+        fetch(apiEndpoint('/api/salon/services'))
       ]);
 
       let currentQueue: QueueItem[] = [];
@@ -141,7 +142,7 @@ export const ReceptionPage: React.FC = () => {
     setActionMessage(null);
 
     try {
-      const res = await fetch('/api/queue/call-next', {
+      const res = await fetch(apiEndpoint('/api/queue/call-next'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ barberId })
@@ -169,7 +170,7 @@ export const ReceptionPage: React.FC = () => {
 
     setErrorMessage(null);
     try {
-      const res = await fetch(`/api/queue/ticket/${ticket.id}/noshow`, { method: 'POST' });
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${ticket.id}/noshow`), { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         setActionMessage(`Customer ${ticket.token} marked as No-Show.`);
@@ -190,7 +191,7 @@ export const ReceptionPage: React.FC = () => {
 
     setErrorMessage(null);
     try {
-      const res = await fetch(`/api/queue/ticket/${ticket.id}/cancel`, { method: 'POST' });
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${ticket.id}/cancel`), { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         setActionMessage(`Ticket ${ticket.token} was successfully cancelled.`);
@@ -228,14 +229,15 @@ export const ReceptionPage: React.FC = () => {
     setSubmittingWalkin(true);
 
     try {
-      const res = await fetch('/api/queue/join', {
+      const res = await fetch(apiEndpoint('/api/queue/join'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           customerName: walkinName.trim(),
           phone: cleanPhone,
           serviceIds: walkinServices,
-          preferredBarber: walkinBarber
+          preferredBarber: walkinBarber,
+          isWalkIn: true
         })
       });
 

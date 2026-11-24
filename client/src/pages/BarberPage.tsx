@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { Clock, Play, CheckCircle2, Coffee, Scissors, Users, ArrowLeft, AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocket } from '../contexts/SocketContext';
+import { apiEndpoint } from '../lib/api';
 
 interface Service {
   id: number;
@@ -72,7 +73,7 @@ export const BarberPage: React.FC = () => {
 
   const fetchStationData = async () => {
     try {
-      const res = await fetch(`/api/queue/barber/${barberParam}`);
+      const res = await fetch(apiEndpoint(`/api/queue/barber/${barberParam}`));
       if (!res.ok) {
         if (res.status === 404) setNotFound(true);
         return;
@@ -128,7 +129,7 @@ export const BarberPage: React.FC = () => {
     setActionMessage(null);
 
     try {
-      const res = await fetch(`/api/salon/barbers/${barber.id}/status`, {
+      const res = await fetch(apiEndpoint(`/api/salon/barbers/${barber.id}/status`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_on_break: breakVal ? 1 : 0 })
@@ -150,7 +151,7 @@ export const BarberPage: React.FC = () => {
     setActionMessage(null);
 
     try {
-      const res = await fetch(`/api/queue/ticket/${currentCustomer.id}/start`, { method: 'POST' });
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${currentCustomer.id}/start`), { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         setErrorMessage(data.error || 'Failed to start service.');
@@ -173,7 +174,7 @@ export const BarberPage: React.FC = () => {
     setActionMessage(null);
 
     try {
-      const res = await fetch(`/api/queue/ticket/${currentCustomer.id}/done`, { method: 'POST' });
+      const res = await fetch(apiEndpoint(`/api/queue/ticket/${currentCustomer.id}/done`), { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         setErrorMessage(data.error || 'Failed to complete service.');
@@ -197,7 +198,7 @@ export const BarberPage: React.FC = () => {
     setActionMessage(null);
 
     try {
-      const res = await fetch('/api/queue/call-next', {
+      const res = await fetch(apiEndpoint('/api/queue/call-next'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ barberId: barber.id })

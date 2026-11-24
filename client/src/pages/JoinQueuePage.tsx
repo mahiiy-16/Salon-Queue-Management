@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Check, Sparkles, User, Scissors, UserCheck, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { apiEndpoint } from '../lib/api';
 
 interface Service {
   id: number;
@@ -44,8 +45,8 @@ export const JoinQueuePage: React.FC = () => {
     const fetchData = async () => {
       try {
         const [servicesRes, barbersRes] = await Promise.all([
-          fetch('/api/salon/services'),
-          fetch('/api/salon/barbers')
+          fetch(apiEndpoint('/api/salon/services')),
+          fetch(apiEndpoint('/api/salon/barbers'))
         ]);
 
         if (servicesRes.ok) {
@@ -119,7 +120,7 @@ export const JoinQueuePage: React.FC = () => {
     setSubmitting(true);
 
     try {
-      const response = await fetch('/api/queue/join', {
+      const response = await fetch(apiEndpoint('/api/queue/join'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

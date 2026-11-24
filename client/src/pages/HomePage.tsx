@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Users, Clock, ArrowRight, Scissors, Sparkles, CheckCircle2, AlertCircle, MapPin, Calendar } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocket } from '../contexts/SocketContext';
+import { apiEndpoint } from '../lib/api';
 
 interface SalonStatus {
   isOpen: boolean;
@@ -53,9 +54,9 @@ export const HomePage: React.FC = () => {
   const fetchLiveStatus = async () => {
     try {
       const [statusRes, servicesRes, barbersRes] = await Promise.all([
-        fetch('/api/salon/status'),
-        fetch('/api/salon/services'),
-        fetch('/api/salon/barbers')
+        fetch(apiEndpoint('/api/salon/status')),
+        fetch(apiEndpoint('/api/salon/services')),
+        fetch(apiEndpoint('/api/salon/barbers'))
       ]);
 
       if (statusRes.ok) {

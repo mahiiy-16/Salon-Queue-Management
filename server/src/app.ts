@@ -9,7 +9,18 @@ export function createApp(): Express {
   const app = express();
 
   app.use(cors({
-    origin: [ENV.CLIENT_URL, 'http://localhost:5173'],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+      if (ENV.ALLOWED_ORIGINS.includes(origin) || ENV.ALLOWED_ORIGINS.includes('*')) {
+        return callback(null, true);
+      }
+      // In development or preview, also allow Vercel preview domains if configured
+      if (origin.endsWith('.vercel.app')) {
+        return callback(null, true);
+      }
+      return callback(null, true); // Permissive for production web clients with credentials
+    },
     credentials: true
   }));
 

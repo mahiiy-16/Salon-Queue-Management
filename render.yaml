@@ -1,0 +1,27 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Backend Web Service on Render (Node.js Express + Socket.IO + SQLite)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: salon-queue-server
+    runtime: node
+    plan: starter # Starter plan or higher recommended for persistent disk support
+    region: oregon # Or nearest region
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: CLIENT_URL
+        sync: false # Set to your deployed Vercel URL, e.g. https://your-salon.vercel.app
+      - key: DB_PATH
+        value: /var/data/salon_queue.sqlite
+    # Persistent Disk configuration to preserve SQLite queue data across redeployments
+    disk:
+      name: salon-sqlite-data
+      mountPath: /var/data
+      sizeGB: 1
